@@ -4,20 +4,19 @@ from discord import app_commands
 import aiohttp
 import json
 import os
-from dotenv import load_dotenv
 
-# Lade .env (Discord Token + RapidAPI Key)
-load_dotenv()
+# -------------------------
+# Tokens aus Railway-Umgebungsvariablen
+# -------------------------
 TOKEN = os.getenv("DISCORD_TOKEN")
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
-RAPIDAPI_HOST = "tiktok-scraper-api2.p.rapidapi.com"  # Je nach API ggf. anpassen
+RAPIDAPI_HOST = "tiktok-scraper-api2.p.rapidapi.com"
 
 # -------------------------
 # Discord Setup
 # -------------------------
 intents = discord.Intents.default()
 intents.guilds = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 DATA_FILE = "data.json"
 
@@ -37,7 +36,7 @@ def save_data(data):
 data = load_data()
 
 # -------------------------
-# Prüft ob Nutzer Admin ist
+# Prüft, ob Nutzer Admin ist
 # -------------------------
 def is_admin(interaction: discord.Interaction) -> bool:
     return interaction.user.guild_permissions.administrator
@@ -52,75 +51,72 @@ async def on_ready():
     check_tiktok.start()
 
 # -------------------------
-# Slash Commands (Admin Only)
+# Slash Command: /config-distok-list
 # -------------------------
-
-# /setchannel
-@bot.tree.command(name="setchannel", description="Setzt den Kanal für TikTok-Benachrichtigungen. (Nur Admins)")
-@app_commands.describe(channel="Kanal, in den der Bot TikTok-Nachrichten posten soll")
-async def setchannel(interaction: discord.Interaction, channel: discord.TextChannel):
-    if not is_admin(interaction):
-        await interaction.response.send_message("❌ Nur Administratoren können diesen Befehl nutzen.", ephemeral=True)
+@bot.tree.command(name="config-distok-list", description="Verwalte TikTok-User + Channels (Admin-only)")
+@app_commands.describe(
+    action="add / remove / edit / list",
+    index="Index zum Bearbeiten/Löschen (1-10)",
+    username="TikTok Benutzername (ohne @)",
+    channel="Discord-Kanal (#channel)"
+)
+async def config_distok_list(interaction: discord.Interaction, action: str, index: int = None, username: str = None, channel: discord.TextChannel = None):
+    if not is_admin(interaction) and action != "list":
+        await interaction.response.send_message("❌ Nur Admins können diese Aktion ausführen.", ephemeral=True)
         return
 
     guild_id = str(interaction.guild.id)
-    if guild_id not in data["guilds"]:
-        data["guilds"][guild_id] = {"channel_id": None, "tiktok_users": {}}
+    guild = data["guilds"].setdefault(guild_id, {"distok_list": []})
+    distok_list = guild["distok_list"]
 
-    data["guilds"][guild_id]["channel_id"] = channel.id
-    save_data(data)
-    await interaction.response.send_message(f"✅ Kanal gesetzt: {channel.mention}", ephemeral=True)
+    action = action.lower()
+    if action == "add":
+        if len(distok_list) >= 10:
+            await interaction.response.send_message("❌ Maximal 10 Einträge erlaubt.", ephemeral=True)
+            return
+        if not username or not channel:
+            await interaction.response.send_message("❌ Bitte gib einen TikTok-Benutzernamen und einen Kanal an.", ephemeral=True)
+            return
+        distok_list.append({"username": username, "channel_id": channel.id, "last_video": None})
+        save_data(data)
+        await interaction.response.send_message(f"✅ Eintrag hinzugefügt: `{username}` → {channel.mention}", ephemeral=True)
 
-# /settiktokname
-@bot.tree.command(name="settiktokname", description="Fügt einen TikTok-Benutzer hinzu, der überwacht werden soll. (Nur Admins)")
-@app_commands.describe(username="TikTok-Benutzername (ohne @)")
-async def settiktokname(interaction: discord.Interaction, username: str):
-    if not is_admin(interaction):
-        await interaction.response.send_message("❌ Nur Administratoren können diesen Befehl nutzen.", ephemeral=True)
-        return
+    elif action == "remove":
+        if not index or index < 1 or index > len(distok_list):
+            await interaction.response.send_message("❌ Ungültiger Index.", ephemeral=True)
+            return
+        removed = distok_list.pop(index - 1)
+        save_data(data)
+        await interaction.response.send_message(f"🗑️ Eintrag entfernt: `{removed['username']}`", ephemeral=True)
 
-    guild_id = str(interaction.guild.id)
-    guild = data["guilds"].setdefault(guild_id, {"channel_id": None, "tiktok_users": {}})
+    elif action == "edit":
+        if not index or index < 1 or index > len(distok_list):
+            await interaction.response.send_message("❌ Ungültiger Index.", ephemeral=True)
+            return
+        if not username and not channel:
+            await interaction.response.send_message("❌ Bitte gib entweder einen neuen Benutzernamen oder Kanal an.", ephemeral=True)
+            return
+        entry = distok_list[index - 1]
+        if username:
+            entry["username"] = username
+        if channel:
+            entry["channel_id"] = channel.id
+        save_data(data)
+        await interaction.response.send_message(f"✏️ Eintrag aktualisiert: `{entry['username']}` → <#{entry['channel_id']}>", ephemeral=True)
 
-    if username in guild["tiktok_users"]:
-        await interaction.response.send_message("❗Dieser TikTok-Benutzer wird bereits überwacht.", ephemeral=True)
-        return
+    elif action == "list":
+        if not distok_list:
+            await interaction.response.send_message("📭 Keine TikTok-User/Channels eingetragen.", ephemeral=True)
+            return
+        msg = "**__DisTok List__**\n"
+        for i, entry in enumerate(distok_list, start=1):
+            ch = interaction.guild.get_channel(entry["channel_id"])
+            ch_mention = ch.mention if ch else f"ChannelID {entry['channel_id']}"
+            msg += f"{i}. Tiktokuser: `{entry['username']}`    Tiktokchannel: {ch_mention}\n"
+        await interaction.response.send_message(msg, ephemeral=True)
 
-    guild["tiktok_users"][username] = {"last_video": None}
-    save_data(data)
-    await interaction.response.send_message(f"✅ TikTok-Account `{username}` hinzugefügt.", ephemeral=True)
-
-# /removetiktokname
-@bot.tree.command(name="removetiktokname", description="Entfernt einen TikTok-Benutzer aus der Überwachungsliste. (Nur Admins)")
-@app_commands.describe(username="TikTok-Benutzername (ohne @)")
-async def removetiktokname(interaction: discord.Interaction, username: str):
-    if not is_admin(interaction):
-        await interaction.response.send_message("❌ Nur Administratoren können diesen Befehl nutzen.", ephemeral=True)
-        return
-
-    guild_id = str(interaction.guild.id)
-    guild = data["guilds"].get(guild_id)
-
-    if not guild or username not in guild["tiktok_users"]:
-        await interaction.response.send_message("❌ Dieser TikTok-Benutzer wird nicht überwacht.", ephemeral=True)
-        return
-
-    del guild["tiktok_users"][username]
-    save_data(data)
-    await interaction.response.send_message(f"🗑️ TikTok-Account `{username}` entfernt.", ephemeral=True)
-
-# /listtiktok (Darf jeder sehen)
-@bot.tree.command(name="listtiktok", description="Listet alle aktuell überwachten TikTok-Accounts auf.")
-async def listtiktok(interaction: discord.Interaction):
-    guild_id = str(interaction.guild.id)
-    guild = data["guilds"].get(guild_id)
-
-    if not guild or not guild["tiktok_users"]:
-        await interaction.response.send_message("📭 Keine TikTok-Accounts eingetragen.", ephemeral=True)
-        return
-
-    users = "\n".join([f"• `{u}`" for u in guild["tiktok_users"].keys()])
-    await interaction.response.send_message(f"👀 Überwachte TikTok-Accounts:\n{users}", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Ungültige Aktion. Nutze add / remove / edit / list.", ephemeral=True)
 
 # -------------------------
 # TikTok-Abfrage über RapidAPI
@@ -149,27 +145,23 @@ async def get_latest_tiktok(username: str):
 async def check_tiktok():
     print("🔁 Überprüfe TikTok-Accounts ...")
     for guild_id, guild_data in data["guilds"].items():
-        channel_id = guild_data.get("channel_id")
-        if not channel_id:
-            continue
-
-        channel = bot.get_channel(channel_id)
-        if not channel:
-            continue
-
-        for username, info in guild_data.get("tiktok_users", {}).items():
+        for entry in guild_data.get("distok_list", []):
             try:
-                latest = await get_latest_tiktok(username)
+                latest = await get_latest_tiktok(entry["username"])
                 if not latest:
                     continue
 
-                last_video_id = info.get("last_video")
+                last_video_id = entry.get("last_video")
                 if last_video_id != latest["video_id"]:
-                    info["last_video"] = latest["video_id"]
+                    entry["last_video"] = latest["video_id"]
                     save_data(data)
 
+                    channel = bot.get_channel(entry["channel_id"])
+                    if not channel:
+                        continue
+
                     message = (
-                        f"**__Neues Tiktokvideo von {username}__**\n"
+                        f"**__Neues Tiktokvideo von {entry['username']}__**\n"
                         f"**Ihr wisst alle was zutun ist!**\n"
                         f"> **Das Video liken ❤️**\n"
                         f"> **Einen netten Kommentar schreiben ⌨️**\n"
@@ -180,7 +172,7 @@ async def check_tiktok():
                     )
                     await channel.send(message)
             except Exception as e:
-                print(f"⚠️ Fehler bei {username}: {e}")
+                print(f"⚠️ Fehler bei {entry['username']}: {e}")
 
 # -------------------------
 bot.run(TOKEN)
